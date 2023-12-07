@@ -1,2 +1,5 @@
 bin/
 *.csv
+batch.sh
+
+.DS_Store
