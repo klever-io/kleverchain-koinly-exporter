@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math/big"
 	"time"
 )
 
@@ -60,6 +61,8 @@ func ParseToKoinlyTX(sender string, txList *TxListResponseResponseData) []Koinly
 					kt.SentCurrency = "KLV"
 					kt.Tag = "cost"
 					description = fmt.Sprintf("Transaction Fee ContractType: %s - Index: %d", c.TypeString, idx)
+					fee = 0
+					feeCurrency = ""
 				}
 
 				kt.FeeAmount = fee
@@ -81,9 +84,11 @@ func decodeTransaction(hash, txSender, sender string, c *TXContract, r []map[str
 		return decodeTransfer(txSender, sender, c)
 	case 5: // unfreeze
 		// register claim during unfreeze if any
-		return decodeClaim(txSender, sender, c, r, hash)
+		return decodeClaim(txSender, sender, c, r)
+	case 8: // withdraw
+		return decodeWithdraw(txSender, sender, c, r)
 	case 9: // claim
-		return decodeClaim(txSender, sender, c, r, hash)
+		return decodeClaim(txSender, sender, c, r)
 	}
 	return nil
 }
@@ -142,7 +147,7 @@ func decodeTransfer(txSender, sender string, c *TXContract) *KoinlyTransaction {
 	return nil
 }
 
-func decodeClaim(txSender, sender string, c *TXContract, receipts []map[string]interface{}, hash string) *KoinlyTransaction {
+func decodeClaim(txSender, sender string, c *TXContract, receipts []map[string]interface{}) *KoinlyTransaction {
 	// TODO: count for multiple tokens claimed
 	amount := float64(0)
 	tokenReceived := ""
@@ -162,8 +167,7 @@ func decodeClaim(txSender, sender string, c *TXContract, receipts []map[string]i
 				tokenReceived = t.(string)
 			}
 			// get token and decimate amount
-			v := r["amount"].(float64) / GetTokenBase(tokenReceived)
-			amount += v
+			amount += getAmount(r["amount"], tokenReceived)
 		}
 	}
 
@@ -181,4 +185,55 @@ func decodeClaim(txSender, sender string, c *TXContract, receipts []map[string]i
 		NetWorthCurrency: tokenReceived,
 		Tag:              tag,
 	}
+}
+
+func decodeWithdraw(txSender, sender string, c *TXContract, receipts []map[string]interface{}) *KoinlyTransaction {
+	amount := float64(0)
+	tokenReceived := ""
+	for _, r := range receipts {
+		if r["type"].(float64) != 18 {
+			continue
+		}
+
+		tokenReceived = "KLV"
+		// OLD receipt format no tokenReceived
+		if t, ok := r["assetId"]; ok && t != nil {
+			tokenReceived = t.(string)
+		}
+
+		// get token and decimate amount
+		amount += getAmount(r["amount"], tokenReceived)
+	}
+
+	tag := "Remove from Pool"
+	if amount == 0 {
+		tag = "costs"
+	}
+
+	return &KoinlyTransaction{
+		SentAmount:       0,
+		SentCurrency:     "",
+		ReceivedAmount:   amount,
+		ReceivedCurrency: tokenReceived,
+		NetWorthAmount:   amount,
+		NetWorthCurrency: tokenReceived,
+		Tag:              tag,
+	}
+}
+
+func getAmount(receipt interface{}, id string) float64 {
+	base := big.NewFloat(GetTokenBase(id))
+	f := big.NewFloat(0)
+	switch r := receipt.(type) {
+	case string:
+		f, _ = f.SetString(r)
+	case float64:
+		f.SetFloat64(r)
+	}
+
+	f = f.Quo(f, base)
+	fv, _ := f.Float64()
+
+	return fv
+
 }
