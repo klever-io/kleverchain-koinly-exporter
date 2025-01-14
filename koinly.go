@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+var ignoreTokens = map[string]bool{
+	"MOTO-2XES":   true,
+	"KONG-LGAJ":   true,
+	"SKC-16DS":    true,
+	"VLX-3LAS":    true,
+	"GOHAN-1ZDU":  true,
+	"PHARAO-204Q": true,
+	"CREDIT-KH1Q": true,
+	"DROP-198U":   true,
+}
+
 func swapAssetId(assetId string, amount float64) (string, float64, string) {
 
 	switch assetId {
@@ -52,25 +63,27 @@ func ParseToKoinlyTX(sender string, txList *TxListResponseResponseData) []Koinly
 				feeCurrency = ""
 			}
 
-			if kt := decodeTransaction(tx.Hash, tx.Sender, sender, c, tx.Receipts); kt != nil {
-				kt.Date = date
+			if kts := decodeTransaction(tx.Hash, tx.Sender, sender, c, tx.Receipts); len(kts) > 0 {
+				for _, kt := range kts {
+					kt.Date = date
 
-				if kt.SentAmount == 0 && kt.ReceivedAmount == 0 {
-					// consider using TX fee as withdraw and tag as costs if no amount is set
-					kt.SentAmount = fee
-					kt.SentCurrency = "KLV"
-					kt.Tag = "cost"
-					description = fmt.Sprintf("Transaction Fee ContractType: %s - Index: %d", c.TypeString, idx)
-					fee = 0
-					feeCurrency = ""
+					if kt.SentAmount == 0 && kt.ReceivedAmount == 0 {
+						// consider using TX fee as withdraw and tag as costs if no amount is set
+						kt.SentAmount = fee
+						kt.SentCurrency = "KLV"
+						kt.Tag = "cost"
+						description = fmt.Sprintf("Transaction Fee ContractType: %s - Index: %d", c.TypeString, idx)
+						fee = 0
+						feeCurrency = ""
+					}
+
+					kt.FeeAmount = fee
+					kt.FeeCurrency = feeCurrency
+					kt.Description = description
+					kt.TxHash = fmt.Sprintf("%s%s", kleverscanURL, tx.Hash)
+
+					kList = append(kList, *kt)
 				}
-
-				kt.FeeAmount = fee
-				kt.FeeCurrency = feeCurrency
-				kt.Description = description
-				kt.TxHash = fmt.Sprintf("%s%s", kleverscanURL, tx.Hash)
-
-				kList = append(kList, *kt)
 			}
 		}
 	}
@@ -78,12 +91,19 @@ func ParseToKoinlyTX(sender string, txList *TxListResponseResponseData) []Koinly
 	return kList
 }
 
-func decodeTransaction(hash, txSender, sender string, c *TXContract, r []map[string]interface{}) *KoinlyTransaction {
+func decodeTransaction(hash, txSender, sender string, c *TXContract, r []map[string]interface{}) []*KoinlyTransaction {
 	switch c.Type {
 	case 0: // transfer
 		return decodeTransfer(txSender, sender, c)
+	case 4: // freeze
+		claim := decodeClaim(txSender, sender, c, r)
+		toPool := decodeFreeze(txSender, sender, c, r)
+		return append(claim, toPool...)
 	case 5: // unfreeze
-		// register claim during unfreeze if any
+		return decodeClaim(txSender, sender, c, r)
+	case 6: // delegate
+		return decodeClaim(txSender, sender, c, r)
+	case 7: // undelegate
 		return decodeClaim(txSender, sender, c, r)
 	case 8: // withdraw
 		return decodeWithdraw(txSender, sender, c, r)
@@ -93,7 +113,7 @@ func decodeTransaction(hash, txSender, sender string, c *TXContract, r []map[str
 	return nil
 }
 
-func decodeTransfer(txSender, sender string, c *TXContract) *KoinlyTransaction {
+func decodeTransfer(txSender, sender string, c *TXContract) []*KoinlyTransaction {
 	// check if address is sender or receiver
 	if txSender == sender {
 		amount := float64(0)
@@ -112,13 +132,15 @@ func decodeTransfer(txSender, sender string, c *TXContract) *KoinlyTransaction {
 		amount = float64(c.Parameter.(map[string]interface{})["amount"].(float64)) / GetTokenBase(assetId)
 		assetId, worthAmount, worthCurrency = swapAssetId(assetId, amount)
 
-		return &KoinlyTransaction{
-			SentAmount:       amount,
-			SentCurrency:     assetId,
-			ReceivedAmount:   0,
-			ReceivedCurrency: "",
-			NetWorthAmount:   worthAmount,
-			NetWorthCurrency: worthCurrency,
+		return []*KoinlyTransaction{
+			{
+				SentAmount:       amount,
+				SentCurrency:     assetId,
+				ReceivedAmount:   0,
+				ReceivedCurrency: "",
+				NetWorthAmount:   worthAmount,
+				NetWorthCurrency: worthCurrency,
+			},
 		}
 	}
 
@@ -134,20 +156,27 @@ func decodeTransfer(txSender, sender string, c *TXContract) *KoinlyTransaction {
 		amount := float64(c.Parameter.(map[string]interface{})["amount"].(float64)) / GetTokenBase(assetId)
 		assetId, worthAmount, worthCurrency := swapAssetId(assetId, amount)
 
-		return &KoinlyTransaction{
-			SentAmount:       0,
-			SentCurrency:     "",
-			ReceivedAmount:   amount,
-			ReceivedCurrency: assetId,
-			NetWorthAmount:   worthAmount,
-			NetWorthCurrency: worthCurrency,
+		// skip TOKENs that are not supported
+		if ok := ignoreTokens[assetId]; ok {
+			return nil
+		}
+
+		return []*KoinlyTransaction{
+			{
+				SentAmount:       0,
+				SentCurrency:     "",
+				ReceivedAmount:   amount,
+				ReceivedCurrency: assetId,
+				NetWorthAmount:   worthAmount,
+				NetWorthCurrency: worthCurrency,
+			},
 		}
 	}
 
 	return nil
 }
 
-func decodeClaim(txSender, sender string, c *TXContract, receipts []map[string]interface{}) *KoinlyTransaction {
+func decodeClaim(txSender, sender string, c *TXContract, receipts []map[string]interface{}) []*KoinlyTransaction {
 	// TODO: count for multiple tokens claimed
 	amount := float64(0)
 	tokenReceived := ""
@@ -176,18 +205,49 @@ func decodeClaim(txSender, sender string, c *TXContract, receipts []map[string]i
 		tag = "costs"
 	}
 
-	return &KoinlyTransaction{
-		SentAmount:       0,
-		SentCurrency:     "",
-		ReceivedAmount:   amount,
-		ReceivedCurrency: tokenReceived,
-		NetWorthAmount:   amount,
-		NetWorthCurrency: tokenReceived,
-		Tag:              tag,
+	return []*KoinlyTransaction{
+		{
+			SentAmount:       0,
+			SentCurrency:     "",
+			ReceivedAmount:   amount,
+			ReceivedCurrency: tokenReceived,
+			NetWorthAmount:   amount,
+			NetWorthCurrency: tokenReceived,
+			Tag:              tag,
+		},
 	}
 }
 
-func decodeWithdraw(txSender, sender string, c *TXContract, receipts []map[string]interface{}) *KoinlyTransaction {
+func decodeFreeze(txSender, sender string, c *TXContract, receipts []map[string]interface{}) []*KoinlyTransaction {
+	amount := float64(0)
+	assetID := ""
+	for _, r := range receipts {
+		if r["type"].(float64) != 3 {
+			continue
+		}
+
+		assetID = "KLV"
+		if t, ok := r["assetId"]; ok && t != nil {
+			assetID = t.(string)
+		}
+		// get token and decimate amount
+		amount += getAmount(r["value"], assetID)
+
+	}
+	return []*KoinlyTransaction{
+		{
+			SentAmount:       amount,
+			SentCurrency:     assetID,
+			ReceivedAmount:   amount,
+			ReceivedCurrency: "",
+			NetWorthAmount:   0,
+			NetWorthCurrency: "",
+			Tag:              "",
+		},
+	}
+}
+
+func decodeWithdraw(txSender, sender string, c *TXContract, receipts []map[string]interface{}) []*KoinlyTransaction {
 	amount := float64(0)
 	tokenReceived := ""
 	for _, r := range receipts {
@@ -210,14 +270,16 @@ func decodeWithdraw(txSender, sender string, c *TXContract, receipts []map[strin
 		tag = "costs"
 	}
 
-	return &KoinlyTransaction{
-		SentAmount:       0,
-		SentCurrency:     "",
-		ReceivedAmount:   amount,
-		ReceivedCurrency: tokenReceived,
-		NetWorthAmount:   amount,
-		NetWorthCurrency: tokenReceived,
-		Tag:              tag,
+	return []*KoinlyTransaction{
+		{
+			SentAmount:       0,
+			SentCurrency:     "",
+			ReceivedAmount:   amount,
+			ReceivedCurrency: tokenReceived,
+			NetWorthAmount:   amount,
+			NetWorthCurrency: tokenReceived,
+			Tag:              tag,
+		},
 	}
 }
 
