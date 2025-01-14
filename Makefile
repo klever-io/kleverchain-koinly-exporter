@@ -9,4 +9,9 @@ clean:
 	rm -rf bin/$(BINARY_NAME)
 
 run:
-	go run main.go
+# if no args are passed ask for address
+ifndef address
+	@read -p "Enter address: " address; go run ./... ${address}
+else
+	go run ./... $(address)
+endif

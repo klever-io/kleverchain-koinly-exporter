@@ -54,7 +54,8 @@ func main() {
 		}
 	}
 
-	// validate addess
+	fmt.Println("Exporting transactions for address:", address)
+	// validate address
 	if len(address) != 62 || address[:4] != "klv1" {
 		panic("address must start with klv1 and have a length of 62")
 	}
