@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	api           = "https://api.mainnet.klever.finance"
+	api           = "https://api.mainnet.klever.org"
 	txListPath    = "transaction/list"
 	assetsPath    = "assets"
 	kleverscanURL = "https://kleverscan.org/transaction/"
